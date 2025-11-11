@@ -18,7 +18,7 @@ logger = logging.getLogger(__name__)
 # 🔑 Variables de entorno (Railway)
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
-SCRAPERAPI_KEY = os.environ.get("SCRAPERAPI_KEY")  # ← Necesaria para evitar bloqueos
+SCRAPERAPI_KEY = os.environ.get("SCRAPERAPI_KEY")  # ← Tu clave real aquí
 
 # Validación inicial
 if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
@@ -47,11 +47,10 @@ PRODUCT_URLS = {
     }
 }
 
-# 🌐 Función centralizada para scraping con ScraperAPI (fallback a directo)
+# 🌐 Función centralizada para scraping con ScraperAPI
 def fetch_page(url, use_js=False):
     """Obtiene el HTML de una URL, usando ScraperAPI si está disponible"""
     try:
-        # Si tenemos ScraperAPI, lo usamos (recomendado)
         if SCRAPERAPI_KEY:
             params = {
                 "api_key": SCRAPERAPI_KEY,
@@ -66,7 +65,7 @@ def fetch_page(url, use_js=False):
             else:
                 logger.warning(f"⚠️ ScraperAPI error {response.status_code} para {url}")
         
-        # Fallback: petición directa (puede fallar en Railway)
+        # Fallback: petición directa (solo si no hay ScraperAPI)
         headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
             "Accept-Language": "es-ES,es;q=0.9",
@@ -81,11 +80,10 @@ def fetch_page(url, use_js=False):
         logger.error(f"❌ Error fetching {url}: {e}")
     return None
 
-# 🔍 Extractores de precio (robustos y actualizados)
+# 🔍 Extractores de precio robustos
 def extract_amazon_price(html):
     if not html:
         return None
-    # Método 1: JSON incrustado (__INITIAL_STATE__)
     match = re.search(r'var\s+__INITIAL_STATE__\s*=\s*({.*?});', html, re.DOTALL)
     if match:
         try:
@@ -95,35 +93,15 @@ def extract_amazon_price(html):
                 return float(price)
         except Exception as e:
             logger.warning(f"Amazon JSON parse error: {e}")
-    
-    # Método 2: búsqueda en texto (fallback)
-    price_match = re.search(r'"priceAmount":\s*(\d+\.?\d*)', html)
-    if price_match:
-        try:
-            price = float(price_match.group(1))
-            if 200 < price < 5000:
-                return price
-        except:
-            pass
     return None
 
 def extract_pccomp_price(html):
     if not html:
         return None
-    # Método 1: API-like en HTML
     match = re.search(r'"final"\s*:\s*(\d+\.?\d*)', html)
     if match:
         try:
             price = float(match.group(1))
-            if 200 < price < 5000:
-                return price
-        except:
-            pass
-    # Método 2: texto visible
-    price_match = re.search(r'(\d{3,}[,.]\d{2})\s*€', html)
-    if price_match:
-        try:
-            price = float(price_match.group(1).replace(",", "."))
             if 200 < price < 5000:
                 return price
         except:
@@ -133,20 +111,10 @@ def extract_pccomp_price(html):
 def extract_mediamarkt_price(html):
     if not html:
         return None
-    # Método 1: JSON en HTML
     match = re.search(r'"price"\s*:\s*(\d+\.?\d*)', html)
     if match:
         try:
             price = float(match.group(1))
-            if 200 < price < 5000:
-                return price
-        except:
-            pass
-    # Método 2: texto
-    price_match = re.search(r'(\d{3,})[.,](\d{2})\s*€', html)
-    if price_match:
-        try:
-            price = float(price_match.group(1) + "." + price_match.group(2))
             if 200 < price < 5000:
                 return price
         except:
@@ -160,11 +128,10 @@ async def revisar(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("🚫 Acceso denegado.")
         return
 
-    # Mensaje inicial
     if SCRAPERAPI_KEY:
         await update.message.reply_text("🚀 Obteniendo precios con ScraperAPI (IP rotada)…")
     else:
-        await update.message.reply_text("⚠️ Sin SCRAPERAPI_KEY: alto riesgo de bloqueo. Regístrate en scraperapi.com")
+        await update.message.reply_text("⚠️ Sin SCRAPERAPI_KEY: alto riesgo de bloqueo.")
 
     msg = "📊 *Precios actuales — España* (noviembre 2025)\n\n"
     total_found = 0
@@ -204,9 +171,8 @@ async def revisar(update: Update, context: ContextTypes.DEFAULT_TYPE):
             msg += "   • MediaMarkt: ❌\n"
 
         msg += "\n"
-        time.sleep(0.5)  # Respeto
+        time.sleep(0.5)
 
-    # Resumen
     if total_found == 0:
         msg += "🔴 *Ningún precio encontrado.*\n"
         if SCRAPERAPI_KEY:
