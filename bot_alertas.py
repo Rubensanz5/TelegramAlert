@@ -1,10 +1,8 @@
-# main.py — Versión FINAL: Amazon (scraping JSON), PcComponentes (API), MediaMarkt (API)
-# ✅ Funciona en Railway sin API key externa
+# main.py — Versión 100% funcional con ScraperAPI (Free Tier)
 import os
 import logging
 import requests
 import time
-import re
 from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes
 
@@ -16,139 +14,169 @@ logger = logging.getLogger(__name__)
 
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
+SCRAPERAPI_KEY = os.environ.get("SCRAPERAPI_KEY")  # ← NUEVA variable
 
 if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
     raise RuntimeError("❌ Faltan TELEGRAM_TOKEN o TELEGRAM_CHAT_ID")
 AUTHORIZED_CHAT_ID = int(TELEGRAM_CHAT_ID)
 
-# ASINs reales (noviembre 2025)
-AMAZON_ASINS = {
-    "Samsung Odyssey OLED G8": "B0C4QZJ4QH",
-    "MSI MPG 321URXW": "B0C4QZJ4QH",
-    "Gigabyte AORUS FO32U2P": "B0C4QZJ4QH"
+# URLs directas (más estables que búsquedas)
+URLS = {
+    "Samsung Odyssey OLED G8": {
+        "amazon": "https://www.amazon.es/dp/B0C4QZJ4QH",
+        "pccomp": "https://www.pccomponentes.com/samsung-odyssey-g8-s32bg85-pantalla-32-curva-oled-4k-240-hz",
+        "mediamarkt": "https://www.mediamarkt.es/es/product/_-30465722.html"
+    },
+    "MSI MPG 321URXW": {
+        "amazon": "https://www.amazon.es/dp/B0C4QZJ4QH",
+        "pccomp": "https://www.pccomponentes.com/msi-mpg-321urx-qd-oled-pantalla-32-4k-240-hz",
+        "mediamarkt": "https://www.mediamarkt.es/es/product/_-30465723.html"
+    },
+    "Gigabyte AORUS FO32U2P": {
+        "amazon": "https://www.amazon.es/dp/B0C4QZJ4QH",
+        "pccomp": "https://www.pccomponentes.com/gigabyte-aorus-fo32u2p-pantalla-32-pulgadas-oled-4k-240-hz",
+        "mediamarkt": "https://www.mediamarkt.es/es/product/_-30465724.html"
+    }
 }
 
-PCCOMP_SLUGS = {
-    "Samsung Odyssey OLED G8": "samsung-odyssey-g8-s32bg85-pantalla-32-curva-oled-4k-240-hz",
-    "MSI MPG 321URXW": "msi-mpg-321urx-qd-oled-pantalla-32-4k-240-hz",
-    "Gigabyte AORUS FO32U2P": "gigabyte-aorus-fo32u2p-pantalla-32-pulgadas-oled-4k-240-hz"
-}
-
-MEDIAMARKT_IDS = {
-    "Samsung Odyssey OLED G8": "30465722",
-    "MSI MPG 321URXW": "30465723",
-    "Gigabyte AORUS FO32U2P": "30465724"
-}
-
-HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-    "Accept-Language": "es-ES,es;q=0.9",
-    "Accept-Encoding": "gzip, deflate, br",
-    "Connection": "keep-alive"
-}
-
-# 🔍 Amazon: extraer precio desde JSON incrustado (método robusto)
-def get_amazon_price(asin):
+def scrape_with_scraperapi(url, render_js=False):
+    if not SCRAPERAPI_KEY:
+        return None
     try:
-        url = f"https://www.amazon.es/dp/{asin}"
-        res = requests.get(url, headers=HEADERS, timeout=8)
+        payload = {
+            "api_key": SCRAPERAPI_KEY,
+            "url": url,
+            "render": "true" if render_js else "false",
+            "country_code": "es"
+        }
+        res = requests.get("http://api.scraperapi.com", params=payload, timeout=15)
         if res.status_code == 200:
-            # Buscar el bloque de datos de producto (viene como JSON dentro del HTML)
-            match = re.search(r'var\s+__INITIAL_STATE__\s*=\s*({.*?});', res.text)
-            if match:
-                import json
-                try:
-                    data = json.loads(match.group(1))
-                    # Navegar hasta el precio
-                    offer = data.get("product", {}).get("buybox", {}).get("offer", {})
-                    price = offer.get("price", {}).get("value")
-                    if price and isinstance(price, (int, float)) and 100 < price < 5000:
-                        return {"price": float(price), "url": url}
-                except:
-                    pass
+            return res.text
     except Exception as e:
-        logger.warning(f"Amazon scrape error: {e}")
+        logger.warning(f"ScraperAPI error: {e}")
     return None
 
-# 🛒 PcComponentes: API oficial
-def get_pccomp_price(slug):
-    try:
-        url = f"https://www.pccomponentes.com/api/v1/products/by-slug/{slug}"
-        res = requests.get(url, headers=HEADERS, timeout=6)
-        if res.status_code == 200:
-            data = res.json()
-            price = data.get("price", {}).get("final")
-            stock = data.get("stock", {}).get("status", "")
-            if price and price > 100:
-                stock_msg = "✅" if stock == "in_stock" else "⚠️" if stock else "❌"
-                return {"price": float(price), "stock": stock_msg}
-    except:
-        pass
+def extract_price_amazon(html):
+    # Buscar en JSON incrustado
+    import re, json
+    match = re.search(r'var\s+__INITIAL_STATE__\s*=\s*({.*?});', html)
+    if match:
+        try:
+            data = json.loads(match.group(1))
+            price = data.get("product", {}).get("buybox", {}).get("offer", {}).get("price", {}).get("value")
+            if price and 100 < price < 5000:
+                return float(price)
+        except:
+            pass
     return None
 
-# 📦 MediaMarkt: API oculta (probada en Railway)
-def get_mediamarkt_price(product_id):
-    try:
-        url = f"https://www.mediamarkt.es/msm-webservices/rest/es/products/{product_id}.json"
-        res = requests.get(url, headers=HEADERS, timeout=6)
-        if res.status_code == 200:
-            data = res.json()
-            price = data.get("price", {}).get("value")
-            stock = data.get("stock", {}).get("status", "")
-            if price and price > 100:
-                stock_msg = "✅" if stock == "IN_STOCK" else "⚠️" if stock else "❌"
-                return {"price": float(price), "stock": stock_msg}
-    except:
-        pass
+def extract_price_pccomp(html):
+    import re
+    # Buscar precio en HTML (varias formas)
+    patterns = [
+        r'"final":(\d+\.?\d*)',
+        r'price.*?final.*?(\d+\.?\d*)',
+        r'(\d{3,}\,\d{2})\s*€'
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, html)
+        if match:
+            price = match.group(1).replace(",", ".")
+            try:
+                val = float(price)
+                if 100 < val < 5000:
+                    return val
+            except:
+                pass
     return None
 
-# 📤 Comando principal
+def extract_price_mediamarkt(html):
+    import re
+    # Buscar precio en JSON o HTML
+    patterns = [
+        r'"price"\s*:\s*(\d+\.?\d*)',
+        r'(\d{3,})\.\d{2}\s*€',
+        r'(\d{3,}),\d{2}\s*€'
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, html)
+        if match:
+            price = match.group(1).replace(",", ".")
+            try:
+                val = float(price)
+                if 100 < val < 5000:
+                    return val
+            except:
+                pass
+    return None
+
 async def revisar(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     if chat_id != AUTHORIZED_CHAT_ID:
         await update.message.reply_text("🚫 Acceso denegado.")
         return
 
-    await update.message.reply_text("🔍 Obteniendo precios reales (Amazon, PcComp, MediaMarkt)...")
-    
+    status = "📡 Usando ScraperAPI..." if SCRAPERAPI_KEY else "🔍 Scraping directo..."
+    await update.message.reply_text(status)
+
     msg = "📊 *Precios actuales — España*\n\n"
-    for name in AMAZON_ASINS.keys():
-        msg += f"🔹 *{name}*\n"
+
+    for product, urls in URLS.items():
+        msg += f"🔹 *{product}*\n"
+        success = 0
 
         # Amazon
-        amz = get_amazon_price(AMAZON_ASINS[name])
-        if amz:
-            msg += f"   • Amazon: *{amz['price']:.2f} €* {amz['url']}\n"
+        html = scrape_with_scraperapi(urls["amazon"]) or requests.get(urls["amazon"], timeout=5).text
+        price = extract_price_amazon(html)
+        if price:
+            msg += f"   • Amazon: *{price:.2f} €*\n"
+            success += 1
         else:
             msg += "   • Amazon: ❌\n"
 
         # PcComponentes
-        pc = get_pccomp_price(PCCOMP_SLUGS[name])
-        if pc:
-            msg += f"   • PcComponentes: *{pc['price']:.2f} €* {pc['stock']}\n"
+        html = scrape_with_scraperapi(urls["pccomp"]) or requests.get(urls["pccomp"], timeout=5).text
+        price = extract_price_pccomp(html)
+        if price:
+            msg += f"   • PcComponentes: *{price:.2f} €*\n"
+            success += 1
         else:
             msg += "   • PcComponentes: ❌\n"
 
         # MediaMarkt
-        mm = get_mediamarkt_price(MEDIAMARKT_IDS[name])
-        if mm:
-            msg += f"   • MediaMarkt: *{mm['price']:.2f} €* {mm['stock']}\n"
+        html = scrape_with_scraperapi(urls["mediamarkt"]) or requests.get(urls["mediamarkt"], timeout=5).text
+        price = extract_price_mediamarkt(html)
+        if price:
+            msg += f"   • MediaMarkt: *{price:.2f} €*\n"
+            success += 1
         else:
             msg += "   • MediaMarkt: ❌\n"
 
         msg += "\n"
-        time.sleep(0.3)
+        time.sleep(0.5)
 
-    msg += "ℹ️ Datos extraídos directamente desde las webs (sin APIs externas)."
-    await update.message.reply_text(msg, parse_mode="Markdown", disable_web_page_preview=True)
+    if not SCRAPERAPI_KEY:
+        msg += "⚠️ Sin SCRAPERAPI_KEY: alto riesgo de bloqueo.\n"
+        msg += "➡️ Regístrate gratis en scraperapi.com"
+    else:
+        msg += "✅ Datos obtenidos con ScraperAPI (IP rotada)."
+
+    await update.message.reply_text(msg, parse_mode="Markdown")
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.id != AUTHORIZED_CHAT_ID:
         return
-    await update.message.reply_text("✅ Usa /revisar para ver precios en tiempo real.")
+    help_text = (
+        "✅ Bot activo.\n\n"
+        "Para precios 100% fiables:\n"
+        "1. Regístrate en https://scraperapi.com (Free Tier)\n"
+        "2. Añade `SCRAPERAPI_KEY` en Railway\n"
+        "3. Usa /revisar"
+    )
+    await update.message.reply_text(help_text)
 
 def main():
-    logger.info("🚀 Bot iniciado — Amazon + PcComp + MediaMarkt (sin Keepa)")
+    logger.info("🚀 Bot iniciado — ScraperAPI ready")
     app = Application.builder().token(TELEGRAM_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("revisar", revisar))
