@@ -2,11 +2,11 @@ import os
 import requests
 from bs4 import BeautifulSoup
 import json
-import random
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 from datetime import time
 
+# Lista de productos
 productos = [
     {
         "nombre": "Samsung Odyssey OLED G8",
@@ -28,14 +28,15 @@ productos = [
     }
 ]
 
+# Variables de entorno
 TOKEN = os.environ.get("TELEGRAM_TOKEN")
 CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 
+# Archivo para guardar historial
 archivo_historial = "precios.json"
-MIN_DELAY = 3
-MAX_DELAY = 7
 
 
+# Funciones para historial
 def cargar_historial():
     try:
         with open(archivo_historial, "r") as f:
@@ -43,12 +44,12 @@ def cargar_historial():
     except:
         return {}
 
-
 def guardar_historial(historial):
     with open(archivo_historial, "w") as f:
         json.dump(historial, f, indent=2)
 
 
+# Función para obtener precio desde web
 def obtener_precio(url, tienda):
     headers = {"User-Agent": "Mozilla/5.0", "Accept-Language": "es-ES,es;q=0.9"}
     try:
@@ -64,47 +65,48 @@ def obtener_precio(url, tienda):
         return None
 
 
+# Función principal para revisar precios
 async def revisar(context: ContextTypes.DEFAULT_TYPE):
     historial = cargar_historial()
+    mensajes = []  # Lista de mensajes por producto
 
     for p in productos:
-        for tienda, url in [("pc", p["url_pccomponentes"]), ("amazon", p["url_amazon"])]:
-            precio = obtener_precio(url, tienda)
-            if not precio:
-                continue
-            clave = f"{p['nombre']}_{tienda}"
-
-            # cambio de precio
-            if clave in historial and historial[clave] != precio:
-                await context.bot.send_message(
-                    CHAT_ID,
-                    f"🔔 {p['nombre']} cambió de precio en {tienda}: {historial[clave]}€ → {precio}€"
-                )
-
-            # bajada mínima
-            if precio <= p["precio_minimo"]:
-                await context.bot.send_message(
-                    CHAT_ID,
-                    f"🔥 BAJADA! {p['nombre']} en {tienda}: {precio}€ (mínimo {p['precio_minimo']}€)"
-                )
-
-            historial[clave] = precio
+        linea = f"📦 *{p['nombre']}*\n"
+        for tienda, url in [("PCComponentes", p["url_pccomponentes"]), ("Amazon", p["url_amazon"])]:
+            precio = obtener_precio(url, tienda.lower())
+            if precio is None:
+                linea += f"- {tienda}: ❌ no disponible\n"
+            else:
+                clave = f"{p['nombre']}_{tienda.lower()}"
+                historial[clave] = precio
+                # Resaltar si es menor al mínimo
+                if precio <= p["precio_minimo"]:
+                    linea += f"- {tienda}: 🔥 *{precio}€* (mínimo {p['precio_minimo']}€)\n"
+                else:
+                    linea += f"- {tienda}: {precio}€\n"
+        mensajes.append(linea)
 
     guardar_historial(historial)
 
+    # Enviar un solo mensaje con todos los productos
+    texto = "📋 *Precios actuales:*\n\n" + "\n".join(mensajes)
+    await context.bot.send_message(chat_id=CHAT_ID, text=texto, parse_mode="Markdown")
 
+
+# Comando /revisa
 async def comando_revisa(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("⌛ Revisando precios...")
+    await update.message.reply_text("⌛ Obteniendo precios de los productos...")
     await revisar(context)
-    await update.message.reply_text("✅ Revisión manual completada.")
+    await update.message.reply_text("✅ Revisión completada.")
 
 
+# Función principal del bot
 def main():
     app = ApplicationBuilder().token(TOKEN).build()
 
     app.add_handler(CommandHandler("revisa", comando_revisa))
 
-    # ✅ Crear JobQueue correctamente
+    # JobQueue para revisiones automáticas
     jq = app.job_queue
     jq.run_daily(revisar, time(hour=11))
     jq.run_daily(revisar, time(hour=23))
