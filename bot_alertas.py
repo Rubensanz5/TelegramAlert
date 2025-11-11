@@ -1,15 +1,12 @@
+import os
 import requests
 from bs4 import BeautifulSoup
 import json
 import random
-from datetime import datetime, time as dtime
-import asyncio
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
+from datetime import time
 
-# ------------------------------
-# CONFIGURACIÓN DE PRODUCTOS
-# ------------------------------
 productos = [
     {
         "nombre": "Samsung Odyssey OLED G8",
@@ -19,27 +16,25 @@ productos = [
     },
     {
         "nombre": "MSI MPG 321URXW",
-        "url_pccomponentes": "https://www.pccomponentes.com/monitor-msi-mpg-321urxw-qd-oled-315-qd-oled-ultrahd-4k-240hz-003ms-hdr-400-adaptive-sync-usb-c",
-        "url_amazon": "https://www.amazon.es/MSI-321URXW-QD-OLED-Monitor-cu%C3%A1nticos/dp/B0BSN2BXC5/ref=sr_1_1?__mk_es_ES=%C3%85M%C3%85%C5%BD%C3%95%C3%91&sr=8-1",
+        "url_pccomponentes": "https://www.pccomponentes.com/monitor-msi-mpg-321urxw-qd-oled-315-qd-oled-ultrahdt-4k-240hz-003ms-hdr-400-adaptive-sync-usb-c",
+        "url_amazon": "https://www.amazon.es/MSI-321URXW-QD-OLED-Monitor-cu%C3%A1nticos/dp/B0BSN2BXC5/ref=sr_1_1",
         "precio_minimo": 849.00
     },
     {
         "nombre": "Gigabyte AORUS FO32U2P",
         "url_pccomponentes": "https://www.pccomponentes.com/monitor-gigabyte-aorus-fo32u2p-315-qd-oled-ultrahd-4k-240hz-freesync-premium",
-        "url_amazon": "https://www.amazon.es/Gigabyte-Monitor-Juegos-AORUS-FO32U2P/dp/B0CYQG1LZX/ref=sr_1_1?__mk_es_ES=%C3%85M%C3%85%C5%BD%C3%95%C3%91&sr=8-1y",
+        "url_amazon": "https://www.amazon.es/Gigabyte-Monitor-Juegos-AORUS-FO32U2P/dp/B0CYQG1LZX/ref=sr_1_1",
         "precio_minimo": 799.00
     }
 ]
 
-TOKEN = "7963591728:AAFVwQiaM5-QMgoeA01SABGDSMlo-rNoTeI"
-CHAT_ID = "7963591728"
+TOKEN = os.environ.get("TELEGRAM_TOKEN")
+CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
+
 archivo_historial = "precios.json"
 MIN_DELAY = 3
 MAX_DELAY = 7
 
-# ------------------------------
-# FUNCIONES DEL BOT
-# ------------------------------
 def cargar_historial():
     try:
         with open(archivo_historial, "r") as f:
@@ -51,80 +46,47 @@ def guardar_historial(historial):
     with open(archivo_historial, "w") as f:
         json.dump(historial, f, indent=2)
 
-def enviar_telegram(mensaje, context):
-    context.bot.send_message(chat_id=CHAT_ID, text=mensaje)
-
 def obtener_precio(url, tienda):
-    headers_pc = {"User-Agent": "Mozilla/5.0"}
-    headers_amazon = {"User-Agent": "Mozilla/5.0","Accept-Language": "es-ES,es;q=0.9"}
-    for _ in range(3):
-        try:
-            if tienda == "pccomponentes":
-                page = requests.get(url, headers=headers_pc, timeout=10)
-                soup = BeautifulSoup(page.content, "html.parser")
-                precio_tag = soup.find("span", class_="product-sales-price")
-            else:
-                page = requests.get(url, headers=headers_amazon, timeout=10)
-                soup = BeautifulSoup(page.content, "html.parser")
-                precio_tag = soup.find("span", class_="a-price-whole")
-            if precio_tag:
-                precio_str = precio_tag.text.strip().replace(".", "").replace(",", ".").replace("€","")
-                return float(precio_str)
-        except:
-            continue
-    return None
+    headers = {"User-Agent": "Mozilla/5.0", "Accept-Language": "es-ES,es;q=0.9"}
+    try:
+        page = requests.get(url, headers=headers, timeout=10)
+        soup = BeautifulSoup(page.text, "html.parser")
+        if tienda == "pc":
+            tag = soup.find("span", class_="product-sales-price")
+        else:
+            tag = soup.find("span", class_="a-price-whole")
+        if tag:
+            return float(tag.text.replace(".", "").replace("€", "").replace(",", "."))
+    except:
+        return None
 
-def revisar_precios(context):
+async def revisar(context: ContextTypes.DEFAULT_TYPE):
     historial = cargar_historial()
     for p in productos:
-        for tienda, url in [("pccomponentes", p["url_pccomponentes"]), ("amazon", p["url_amazon"])]:
+        for tienda, url in [("pc", p["url_pccomponentes"]), ("amazon", p["url_amazon"])]:
             precio = obtener_precio(url, tienda)
-            if precio is None:
+            if not precio:
                 continue
-            key = f"{p['nombre']}_{tienda}"
-            if key in historial and historial[key] != precio:
-                enviar_telegram(f"🔔 {p['nombre']} cambio de precio en {tienda}: {historial[key]}€ → {precio}€", context)
+            clave = f"{p['nombre']}_{tienda}"
+            if clave in historial and historial[clave] != precio:
+                await context.bot.send_message(CHAT_ID, f"🔔 {p['nombre']} cambio de precio ({tienda}): {historial[clave]}€ → {precio}€")
             if precio <= p["precio_minimo"]:
-                enviar_telegram(f"🎯 {p['nombre']} bajó de su precio mínimo en {tienda}: {precio}€", context)
-            historial[key] = precio
-            import time; time.sleep(random.randint(MIN_DELAY, MAX_DELAY))
+                await context.bot.send_message(CHAT_ID, f"🔥 BAJADA! {p['nombre']} en {tienda}: {precio}€ (mínimo {p['precio_minimo']}€)")
+            historial[clave] = precio
     guardar_historial(historial)
 
-# ------------------------------
-# COMANDO /revisa
-# ------------------------------
 async def comando_revisa(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("🔎 Revisando precios manualmente...")
-    revisar_precios(context)
+    await update.message.reply_text("⌛ Revisando precios...")
+    await revisar(context)
     await update.message.reply_text("✅ Revisión manual completada.")
 
-# ------------------------------
-# TAREA AUTOMÁTICA
-# ------------------------------
-async def tarea_automatica(app):
-    while True:
-        ahora = datetime.now()
-        # Ejecuta a las 11 AM o 11 PM
-        if ahora.hour == 11 or ahora.hour == 23:
-            revisar_precios(app)
-            # Espera 60 segundos para no ejecutar dos veces en el mismo minuto
-            await asyncio.sleep(60)
-        else:
-            await asyncio.sleep(30)  # Revisa la hora cada 30 segundos
-
-# ------------------------------
-# INICIAR BOT
-# ------------------------------
-async def main():
+def main():
     app = ApplicationBuilder().token(TOKEN).build()
     app.add_handler(CommandHandler("revisa", comando_revisa))
-    
-    # Ejecutar tarea automática en segundo plano
-    app.create_task(tarea_automatica(app))
-    
-    print("Bot iniciado. Comando /revisa disponible y revisiones automáticas 11AM/11PM activas.")
-    await app.run_polling()
+    app.job_queue.run_daily(revisar, time(hour=11))
+    app.job_queue.run_daily(revisar, time(hour=23))
+    print("✅ Bot activo con revisiones automáticas 11:00 y 23:00")
+    app.run_polling()
 
-# Ejecutar asyncio
-import asyncio
-asyncio.run(main())
+if __name__ == "__main__":
+    main()
