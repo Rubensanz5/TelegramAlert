@@ -1,5 +1,4 @@
-python-telegram-bot[job-queue]==20.5
-playwright==1.44.0
+python-telegram-bot==20.7
 requests
 beautifulsoup4
 
