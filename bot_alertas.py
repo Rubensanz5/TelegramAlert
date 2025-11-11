@@ -18,13 +18,18 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-BOT_TOKEN = os.environ.get("BOT_TOKEN")
-AUTHORIZED_CHAT_ID = os.environ.get("CHAT_ID")  # Solo tú puedes usar el bot
+# 🔑 Variables de entorno (¡exactamente como pediste!)
+TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
+TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 
-if not BOT_TOKEN or not AUTHORIZED_CHAT_ID:
-    raise RuntimeError("❌ Faltan BOT_TOKEN o CHAT_ID en variables de entorno")
+if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
+    raise RuntimeError("❌ Faltan variables de entorno: TELEGRAM_TOKEN y/o TELEGRAM_CHAT_ID")
 
-AUTHORIZED_CHAT_ID = int(AUTHORIZED_CHAT_ID)  # Convertimos a int
+# Convertimos CHAT_ID a entero (requerido por la API)
+try:
+    AUTHORIZED_CHAT_ID = int(TELEGRAM_CHAT_ID)
+except ValueError:
+    raise RuntimeError("❌ TELEGRAM_CHAT_ID debe ser un número (ej: 123456789)")
 
 # ======================
 # UTILIDADES
@@ -43,6 +48,7 @@ def clean_price(text):
     cleaned = re.sub(r"[^\d,.]", "", text)
     if not cleaned:
         return None
+    # Formato español: 1.299,99 → 1299.99
     if ',' in cleaned and '.' in cleaned:
         if cleaned.find(',') > cleaned.find('.'):
             cleaned = cleaned.replace('.', '').replace(',', '.')
@@ -52,12 +58,12 @@ def clean_price(text):
         cleaned = cleaned.replace(',', '.')
     try:
         val = float(cleaned)
-        return val if 100 < val < 10000 else None
+        return val if 100 < val < 10000 else None  # filtro lógico para monitores
     except:
         return None
 
 # ======================
-# SCRAPERS (sin selenium)
+# SCRAPERS (100% compatibles con Railway)
 # ======================
 
 def scrape_pccomponentes(query):
@@ -72,7 +78,7 @@ def scrape_pccomponentes(query):
         price_elem = article.select_one(".price, [data-testid='price']")
         return clean_price(price_elem.get_text()) if price_elem else None
     except Exception as e:
-        logger.warning(f"[PcComp] Error: {e}")
+        logger.warning(f"[PcComp] Error buscando '{query}': {e}")
         return None
 
 def scrape_amazon_es(query):
@@ -91,7 +97,7 @@ def scrape_amazon_es(query):
                 price_str += "." + fraction.get_text().strip()
             return clean_price(price_str)
     except Exception as e:
-        logger.warning(f"[Amazon] Error: {e}")
+        logger.warning(f"[Amazon] Error buscando '{query}': {e}")
         return None
 
 def scrape_mediamarkt_es(query):
@@ -103,7 +109,7 @@ def scrape_mediamarkt_es(query):
         if price_elem:
             return clean_price(price_elem.get_text())
     except Exception as e:
-        logger.warning(f"[MediaMarkt] Error: {e}")
+        logger.warning(f"[MediaMarkt] Error buscando '{query}': {e}")
         return None
 
 def get_prices():
@@ -147,7 +153,7 @@ async def revisar(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("🚫 Acceso denegado.")
         return
 
-    await update.message.reply_text("⏳ Buscando precios... (puede tardar 10-20 segundos)")
+    await update.message.reply_text("⏳ Buscando precios... (puede tardar 10–20 segundos)")
     logger.info(f"Usuario {chat_id} ejecutó /revisar")
 
     try:
@@ -163,29 +169,26 @@ async def revisar(update: Update, context: ContextTypes.DEFAULT_TYPE):
             msg += "\n"
         msg += f"✅ Actualizado: {time.strftime('%d/%m %H:%M:%S')}"
         await update.message.reply_text(msg, parse_mode="Markdown")
-        logger.info("✅ Precios enviados correctamente.")
+        logger.info("✅ Precios enviados.")
     except Exception as e:
-        error_msg = f"❌ Error al obtener precios: `{str(e)}`"
-        logger.error(error_msg)
-        await update.message.reply_text(f"⚠️ Hubo un error. Revisa los logs.", parse_mode="Markdown")
+        logger.error(f"❌ Excepción al ejecutar /revisar: {e}")
+        await update.message.reply_text("⚠️ Error al obtener precios. Revisa los logs.")
 
 # ======================
 # INICIO DEL BOT
 # ======================
 
 def main():
-    logger.info("🚀 Iniciando bot de precios (modo comando /revisar)...")
+    logger.info("🚀 Iniciando bot (escuchando comandos: /revisar, /start)...")
     
-    application = Application.builder().token(BOT_TOKEN).build()
+    application = Application.builder().token(TELEGRAM_TOKEN).build()
 
-    # Comandos
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("revisar", revisar))
-    application.add_handler(CommandHandler("check", revisar))  # alias
+    application.add_handler(CommandHandler("check", revisar))    # alias
     application.add_handler(CommandHandler("precios", revisar))  # alias
 
-    # Iniciar con long polling (ideal para Railway)
-    logger.info("📡 Escuchando comandos en Telegram...")
+    logger.info("📡 Bot activo. Esperando comandos en Telegram...")
     application.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
