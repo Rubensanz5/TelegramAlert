@@ -32,11 +32,10 @@ productos = [
 TOKEN = os.environ.get("TELEGRAM_TOKEN")
 CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 
-# Archivo para guardar historial
+# Archivo para historial de precios
 archivo_historial = "precios.json"
 
-
-# Funciones para historial
+# ------------------ Funciones de historial ------------------
 def cargar_historial():
     try:
         with open(archivo_historial, "r") as f:
@@ -48,38 +47,51 @@ def guardar_historial(historial):
     with open(archivo_historial, "w") as f:
         json.dump(historial, f, indent=2)
 
-
-# Función para obtener precio desde web
+# ------------------ Función para obtener precio ------------------
 def obtener_precio(url, tienda):
-    headers = {"User-Agent": "Mozilla/5.0", "Accept-Language": "es-ES,es;q=0.9"}
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                      "AppleWebKit/537.36 (KHTML, like Gecko) "
+                      "Chrome/118.0.5993.90 Safari/537.36",
+        "Accept-Language": "es-ES,es;q=0.9"
+    }
     try:
         page = requests.get(url, headers=headers, timeout=10)
         soup = BeautifulSoup(page.text, "html.parser")
+
         if tienda == "pc":
-            tag = soup.find("span", class_="product-sales-price")
-        else:
-            tag = soup.find("span", class_="a-price-whole")
-        if tag:
-            return float(tag.text.replace(".", "").replace("€", "").replace(",", "."))
-    except:
-        return None
+            tag = soup.find("span", class_="product-sales-price") or \
+                  soup.find("span", class_="precio")
+            if tag:
+                texto = tag.text.strip().replace(".", "").replace("€", "").replace(",", ".")
+                return float(texto)
 
+        elif tienda == "amazon":
+            tag = soup.find("span", class_="a-offscreen")
+            if tag:
+                texto = tag.text.strip().replace("€", "").replace(".", "").replace(",", ".")
+                return float(texto)
 
-# Función principal para revisar precios
+    except Exception as e:
+        print(f"Error al obtener precio de {tienda} ({url}): {e}")
+
+    return None
+
+# ------------------ Función principal de revisión ------------------
 async def revisar(context: ContextTypes.DEFAULT_TYPE):
     historial = cargar_historial()
-    mensajes = []  # Lista de mensajes por producto
+    mensajes = []
 
     for p in productos:
         linea = f"📦 *{p['nombre']}*\n"
         for tienda, url in [("PCComponentes", p["url_pccomponentes"]), ("Amazon", p["url_amazon"])]:
             precio = obtener_precio(url, tienda.lower())
+            clave = f"{p['nombre']}_{tienda.lower()}"
+
             if precio is None:
                 linea += f"- {tienda}: ❌ no disponible\n"
             else:
-                clave = f"{p['nombre']}_{tienda.lower()}"
                 historial[clave] = precio
-                # Resaltar si es menor al mínimo
                 if precio <= p["precio_minimo"]:
                     linea += f"- {tienda}: 🔥 *{precio}€* (mínimo {p['precio_minimo']}€)\n"
                 else:
@@ -88,19 +100,16 @@ async def revisar(context: ContextTypes.DEFAULT_TYPE):
 
     guardar_historial(historial)
 
-    # Enviar un solo mensaje con todos los productos
     texto = "📋 *Precios actuales:*\n\n" + "\n".join(mensajes)
     await context.bot.send_message(chat_id=CHAT_ID, text=texto, parse_mode="Markdown")
 
-
-# Comando /revisa
+# ------------------ Comando /revisa ------------------
 async def comando_revisa(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("⌛ Obteniendo precios de los productos...")
     await revisar(context)
     await update.message.reply_text("✅ Revisión completada.")
 
-
-# Función principal del bot
+# ------------------ Función principal del bot ------------------
 def main():
     app = ApplicationBuilder().token(TOKEN).build()
 
@@ -114,7 +123,5 @@ def main():
     print("✅ Bot activo: revisiones automáticas 11:00 y 23:00, comando /revisa disponible")
     app.run_polling()
 
-
 if __name__ == "__main__":
     main()
-
