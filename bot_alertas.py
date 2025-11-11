@@ -1,161 +1,192 @@
+# main.py — Bot de Telegram que responde a /revisar con precios actuales
 import os
+import logging
+import time
+import random
+import re
 import requests
 from bs4 import BeautifulSoup
-import json
 from telegram import Update
-from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
-from datetime import time
+from telegram.ext import Application, CommandHandler, ContextTypes
 
-# Lista de productos
-productos = [
-    {
-        "nombre": "Samsung Odyssey OLED G8",
-        "url_pccomponentes": "https://www.pccomponentes.com/monitor-samsung-odyssey-oled-g8-ls32fg816suxen-32-qd-oled-ultrahd-4k-240hz-003ms-hdr400-freesync-premium-pro",
-        "url_amazon": "https://www.amazon.es/SAMSUNG-LS32DG802SUXEN-FreeSync-Antirreflejos-Plateado/dp/B0DFVCV1XL",
-        "precio_minimo": 994.32
-    },
-    {
-        "nombre": "MSI MPG 321URXW",
-        "url_pccomponentes": "https://www.pccomponentes.com/monitor-msi-mpg-321urxw-qd-oled-315-qd-oled-ultrahd-4k-240hz-003ms-hdr-400-adaptive-sync-usb-c",
-        "url_amazon": "https://www.amazon.es/MSI-321URXW-QD-OLED-Monitor-cu%C3%A1nticos/dp/B0BSN2BXC5",
-        "precio_minimo": 849.00
-    },
-    {
-        "nombre": "Gigabyte AORUS FO32U2P",
-        "url_pccomponentes": "https://www.pccomponentes.com/monitor-gigabyte-aorus-fo32u2p-315-qd-oled-ultrahd-4k-240hz-freesync-premium",
-        "url_amazon": "https://www.amazon.es/Gigabyte-Monitor-Juegos-AORUS-FO32U2P/dp/B0CYQG1LZX",
-        "precio_minimo": 799.00
-    }
+# ======================
+# CONFIGURACIÓN
+# ======================
+logging.basicConfig(
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    level=logging.INFO
+)
+logger = logging.getLogger(__name__)
+
+BOT_TOKEN = os.environ.get("BOT_TOKEN")
+AUTHORIZED_CHAT_ID = os.environ.get("CHAT_ID")  # Solo tú puedes usar el bot
+
+if not BOT_TOKEN or not AUTHORIZED_CHAT_ID:
+    raise RuntimeError("❌ Faltan BOT_TOKEN o CHAT_ID en variables de entorno")
+
+AUTHORIZED_CHAT_ID = int(AUTHORIZED_CHAT_ID)  # Convertimos a int
+
+# ======================
+# UTILIDADES
+# ======================
+USER_AGENTS = [
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
 ]
 
-TOKEN = os.environ.get("TELEGRAM_TOKEN")
-CHAT_ID = int(os.environ.get("TELEGRAM_CHAT_ID"))
-archivo_historial = "precios.json"
+def get_headers():
+    return {"User-Agent": random.choice(USER_AGENTS)}
 
-def cargar_historial():
-    try:
-        with open(archivo_historial, "r") as f:
-            return json.load(f)
-    except (FileNotFoundError, json.JSONDecodeError):
-        return {}
-
-def guardar_historial(historial):
-    with open(archivo_historial, "w") as f:
-        json.dump(historial, f, indent=2)
-
-# ------------------ Scraping ------------------
-def limpiar_precio(texto):
-    if not texto:
+def clean_price(text):
+    if not text:
         return None
-    texto = texto.replace("€", "").replace(".", "").replace(",", ".").strip()
+    cleaned = re.sub(r"[^\d,.]", "", text)
+    if not cleaned:
+        return None
+    if ',' in cleaned and '.' in cleaned:
+        if cleaned.find(',') > cleaned.find('.'):
+            cleaned = cleaned.replace('.', '').replace(',', '.')
+        else:
+            cleaned = cleaned.replace(',', '')
+    elif ',' in cleaned:
+        cleaned = cleaned.replace(',', '.')
     try:
-        return float(texto)
+        val = float(cleaned)
+        return val if 100 < val < 10000 else None
     except:
         return None
 
-def obtener_precio_pccomponentes(url):
-    try:
-        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
-        response = requests.get(url.strip(), headers=headers, timeout=10)
-        soup = BeautifulSoup(response.text, 'html.parser')
-        tag = soup.select_one("span.product-sales-price")
-        if tag:
-            return limpiar_precio(tag.get_text())
-        return None
-    except Exception as e:
-        print(f"[PCC] Error: {e}")
-        return None
+# ======================
+# SCRAPERS (sin selenium)
+# ======================
 
-def obtener_precio_amazon(url):
+def scrape_pccomponentes(query):
     try:
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
-        }
-        response = requests.get(url.strip(), headers=headers, timeout=12)
-        soup = BeautifulSoup(response.text, 'html.parser')
-
-        # Si dice "No featured offers available", NO hay precio
-        if "No featured offers available" in response.text:
+        url = f"https://www.pccomponentes.com/buscar?q={query.replace(' ', '+')}"
+        res = requests.get(url, headers=get_headers(), timeout=8)
+        res.raise_for_status()
+        soup = BeautifulSoup(res.text, "html.parser")
+        article = soup.select_one("article[data-id]")
+        if not article:
             return None
-
-        # Extraer precio principal (solo si está en .a-price)
-        price_whole = soup.select_one('.a-price-whole')
-        price_fraction = soup.select_one('.a-price-fraction')
-        if price_whole:
-            whole = price_whole.get_text().strip().replace('.', '').replace(',', '')
-            fraction = price_fraction.get_text().strip() if price_fraction else "00"
-            try:
-                precio = float(f"{whole}.{fraction}")
-                if 300 <= precio <= 2000:
-                    return precio
-            except:
-                pass
-
-        # Alternativa: .a-price .a-offscreen
-        price_span = soup.select_one('.a-price .a-offscreen')
-        if price_span:
-            precio = limpiar_precio(price_span.get_text())
-            if precio and 300 <= precio <= 2000:
-                return precio
-
-        return None
-
+        price_elem = article.select_one(".price, [data-testid='price']")
+        return clean_price(price_elem.get_text()) if price_elem else None
     except Exception as e:
-        print(f"[Amazon] Error en {url}: {e}")
+        logger.warning(f"[PcComp] Error: {e}")
         return None
 
-def obtener_precio(url, tienda):
-    if tienda == "pc":
-        return obtener_precio_pccomponentes(url)
-    elif tienda == "amazon":
-        return obtener_precio_amazon(url)
-    return None
+def scrape_amazon_es(query):
+    try:
+        url = f"https://www.amazon.es/s?k={query.replace(' ', '+')}&rh=p_36%3A800-4000"
+        res = requests.get(url, headers=get_headers(), timeout=10)
+        soup = BeautifulSoup(res.text, "html.parser")
+        result = soup.select_one("div[data-component-type='s-search-result']")
+        if not result:
+            return None
+        whole = result.select_one(".a-price-whole")
+        fraction = result.select_one(".a-price-fraction")
+        if whole:
+            price_str = whole.get_text().strip()
+            if fraction:
+                price_str += "." + fraction.get_text().strip()
+            return clean_price(price_str)
+    except Exception as e:
+        logger.warning(f"[Amazon] Error: {e}")
+        return None
 
-# ------------------ Revisión ------------------
-async def revisar(context: ContextTypes.DEFAULT_TYPE):
-    historial = cargar_historial()
-    mensajes = []
+def scrape_mediamarkt_es(query):
+    try:
+        url = f"https://www.mediamarkt.es/es/search.html?query={query.replace(' ', '+')}"
+        res = requests.get(url, headers=get_headers(), timeout=8)
+        soup = BeautifulSoup(res.text, "html.parser")
+        price_elem = soup.select_one("span[font-weight='bold'], .price, [data-test='price']")
+        if price_elem:
+            return clean_price(price_elem.get_text())
+    except Exception as e:
+        logger.warning(f"[MediaMarkt] Error: {e}")
+        return None
 
-    for p in productos:
-        linea = f"📦 *{p['nombre']}*\n"
-        for tienda, url in [("PCComponentes", p["url_pccomponentes"]), ("Amazon", p["url_amazon"])]:
-            precio = obtener_precio(url, "pc" if tienda == "PCComponentes" else "amazon")
-            clave = f"{p['nombre']}_{tienda.lower()}"
+def get_prices():
+    PRODUCTS = {
+        "Samsung Odyssey OLED G8": "Samsung Odyssey G8 S32BG85",
+        "MSI MPG 321URXW": "MSI MPG 321URXW QD-OLED",
+        "Gigabyte AORUS FO32U2P": "Gigabyte AORUS FO32U2P 4K"
+    }
+    results = {}
+    for name, query in PRODUCTS.items():
+        logger.info(f"🔍 Buscando: {name}")
+        amazon = scrape_amazon_es(query)
+        pccomp = scrape_pccomponentes(query)
+        mediamarkt = scrape_mediamarkt_es(query)
+        results[name] = {
+            "Amazon": amazon,
+            "PcComponentes": pccomp,
+            "MediaMarkt": mediamarkt
+        }
+        time.sleep(1 + random.random())
+    return results
 
-            if precio is None:
-                linea += f"- {tienda}: ❌ no disponible\n"
-            else:
-                historial[clave] = precio
-                if precio <= p["precio_minimo"]:
-                    linea += f"- {tienda}: 🔥 *{precio:.2f}€* (mínimo {p['precio_minimo']}€)\n"
-                else:
-                    linea += f"- {tienda}: {precio:.2f}€\n"
-        mensajes.append(linea)
+# ======================
+# MANEJADORES DE COMANDOS
+# ======================
 
-    guardar_historial(historial)
-    texto = "📋 *Precios actuales:*\n\n" + "\n".join(mensajes)
-    await context.bot.send_message(chat_id=CHAT_ID, text=texto, parse_mode="Markdown")
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_chat.id != AUTHORIZED_CHAT_ID:
+        await update.message.reply_text("🚫 No estás autorizado para usar este bot.")
+        return
+    await update.message.reply_text(
+        "👋 ¡Hola! Usa /revisar para obtener los precios actuales de:\n"
+        "• Samsung Odyssey OLED G8\n"
+        "• MSI MPG 321URXW\n"
+        "• Gigabyte AORUS FO32U2P"
+    )
 
-async def comando_revisa(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("⌛ Obteniendo precios...")
-    await revisar(context)
-    await update.message.reply_text("✅ Revisión completada.")
-
-# ------------------ Main ------------------
-def main():
-    if not TOKEN or not CHAT_ID:
-        print("❌ Faltan variables: TELEGRAM_TOKEN o TELEGRAM_CHAT_ID")
+async def revisar(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    if chat_id != AUTHORIZED_CHAT_ID:
+        await update.message.reply_text("🚫 Acceso denegado.")
         return
 
-    app = ApplicationBuilder().token(TOKEN).build()
-    app.add_handler(CommandHandler("revisa", comando_revisa))
+    await update.message.reply_text("⏳ Buscando precios... (puede tardar 10-20 segundos)")
+    logger.info(f"Usuario {chat_id} ejecutó /revisar")
 
-    job_queue = app.job_queue
-    job_queue.run_daily(revisar, time(hour=11))
-    job_queue.run_daily(revisar, time(hour=23))
+    try:
+        prices = get_prices()
+        msg = "📊 *Precios actuales (España)*\n\n"
+        for product, stores in prices.items():
+            msg += f"🔹 *{product}*\n"
+            for store, price in stores.items():
+                if price is not None:
+                    msg += f"   • {store}: *{price:.2f} €*\n"
+                else:
+                    msg += f"   • {store}: ⚠️ No encontrado\n"
+            msg += "\n"
+        msg += f"✅ Actualizado: {time.strftime('%d/%m %H:%M:%S')}"
+        await update.message.reply_text(msg, parse_mode="Markdown")
+        logger.info("✅ Precios enviados correctamente.")
+    except Exception as e:
+        error_msg = f"❌ Error al obtener precios: `{str(e)}`"
+        logger.error(error_msg)
+        await update.message.reply_text(f"⚠️ Hubo un error. Revisa los logs.", parse_mode="Markdown")
 
-    print("✅ Bot activo")
-    app.run_polling()
+# ======================
+# INICIO DEL BOT
+# ======================
+
+def main():
+    logger.info("🚀 Iniciando bot de precios (modo comando /revisar)...")
+    
+    application = Application.builder().token(BOT_TOKEN).build()
+
+    # Comandos
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("revisar", revisar))
+    application.add_handler(CommandHandler("check", revisar))  # alias
+    application.add_handler(CommandHandler("precios", revisar))  # alias
+
+    # Iniciar con long polling (ideal para Railway)
+    logger.info("📡 Escuchando comandos en Telegram...")
+    application.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
     main()
