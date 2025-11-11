@@ -55,10 +55,10 @@ def limpiar_precio(texto):
 
 def obtener_precio_pccomponentes(url):
     try:
-        headers = {"User-Agent": "Mozilla/5.0"}
+        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
         response = requests.get(url.strip(), headers=headers, timeout=10)
         soup = BeautifulSoup(response.text, 'html.parser')
-        tag = soup.select_one("span.product-sales-price, span.precio")
+        tag = soup.select_one("span.product-sales-price")
         if tag:
             return limpiar_precio(tag.get_text())
         return None
@@ -69,20 +69,16 @@ def obtener_precio_pccomponentes(url):
 def obtener_precio_amazon(url):
     try:
         headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
         }
         response = requests.get(url.strip(), headers=headers, timeout=12)
         soup = BeautifulSoup(response.text, 'html.parser')
 
-        # 🔴 Si no hay stock, Amazon lo dice explícitamente
+        # Si dice "No featured offers available", NO hay precio
         if "No featured offers available" in response.text:
             return None
 
-        # 🔴 Verifica si hay botón de compra (solo si hay stock)
-        if not soup.select_one("#add-to-cart-button, #buy-now-button"):
-            return None
-
-        # ✅ Extraer precio principal
+        # Extraer precio principal (solo si está en .a-price)
         price_whole = soup.select_one('.a-price-whole')
         price_fraction = soup.select_one('.a-price-fraction')
         if price_whole:
@@ -90,7 +86,7 @@ def obtener_precio_amazon(url):
             fraction = price_fraction.get_text().strip() if price_fraction else "00"
             try:
                 precio = float(f"{whole}.{fraction}")
-                if 50 <= precio <= 2000:  # Validación de rango razonable
+                if 300 <= precio <= 2000:
                     return precio
             except:
                 pass
@@ -99,7 +95,7 @@ def obtener_precio_amazon(url):
         price_span = soup.select_one('.a-price .a-offscreen')
         if price_span:
             precio = limpiar_precio(price_span.get_text())
-            if precio and 50 <= precio <= 2000:
+            if precio and 300 <= precio <= 2000:
                 return precio
 
         return None
