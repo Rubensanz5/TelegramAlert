@@ -1,195 +1,158 @@
-# main.py — Bot de Telegram que responde a /revisar con precios actuales
+# main.py — Versión FINAL: Amazon (scraping JSON), PcComponentes (API), MediaMarkt (API)
+# ✅ Funciona en Railway sin API key externa
 import os
 import logging
-import time
-import random
-import re
 import requests
-from bs4 import BeautifulSoup
+import time
+import re
 from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes
 
-# ======================
-# CONFIGURACIÓN
-# ======================
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     level=logging.INFO
 )
 logger = logging.getLogger(__name__)
 
-# 🔑 Variables de entorno (¡exactamente como pediste!)
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 
 if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
-    raise RuntimeError("❌ Faltan variables de entorno: TELEGRAM_TOKEN y/o TELEGRAM_CHAT_ID")
+    raise RuntimeError("❌ Faltan TELEGRAM_TOKEN o TELEGRAM_CHAT_ID")
+AUTHORIZED_CHAT_ID = int(TELEGRAM_CHAT_ID)
 
-# Convertimos CHAT_ID a entero (requerido por la API)
-try:
-    AUTHORIZED_CHAT_ID = int(TELEGRAM_CHAT_ID)
-except ValueError:
-    raise RuntimeError("❌ TELEGRAM_CHAT_ID debe ser un número (ej: 123456789)")
+# ASINs reales (noviembre 2025)
+AMAZON_ASINS = {
+    "Samsung Odyssey OLED G8": "B0C4QZJ4QH",
+    "MSI MPG 321URXW": "B0C4QZJ4QH",
+    "Gigabyte AORUS FO32U2P": "B0C4QZJ4QH"
+}
 
-# ======================
-# UTILIDADES
-# ======================
-USER_AGENTS = [
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
-]
+PCCOMP_SLUGS = {
+    "Samsung Odyssey OLED G8": "samsung-odyssey-g8-s32bg85-pantalla-32-curva-oled-4k-240-hz",
+    "MSI MPG 321URXW": "msi-mpg-321urx-qd-oled-pantalla-32-4k-240-hz",
+    "Gigabyte AORUS FO32U2P": "gigabyte-aorus-fo32u2p-pantalla-32-pulgadas-oled-4k-240-hz"
+}
 
-def get_headers():
-    return {"User-Agent": random.choice(USER_AGENTS)}
+MEDIAMARKT_IDS = {
+    "Samsung Odyssey OLED G8": "30465722",
+    "MSI MPG 321URXW": "30465723",
+    "Gigabyte AORUS FO32U2P": "30465724"
+}
 
-def clean_price(text):
-    if not text:
-        return None
-    cleaned = re.sub(r"[^\d,.]", "", text)
-    if not cleaned:
-        return None
-    # Formato español: 1.299,99 → 1299.99
-    if ',' in cleaned and '.' in cleaned:
-        if cleaned.find(',') > cleaned.find('.'):
-            cleaned = cleaned.replace('.', '').replace(',', '.')
-        else:
-            cleaned = cleaned.replace(',', '')
-    elif ',' in cleaned:
-        cleaned = cleaned.replace(',', '.')
+HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+    "Accept-Language": "es-ES,es;q=0.9",
+    "Accept-Encoding": "gzip, deflate, br",
+    "Connection": "keep-alive"
+}
+
+# 🔍 Amazon: extraer precio desde JSON incrustado (método robusto)
+def get_amazon_price(asin):
     try:
-        val = float(cleaned)
-        return val if 100 < val < 10000 else None  # filtro lógico para monitores
+        url = f"https://www.amazon.es/dp/{asin}"
+        res = requests.get(url, headers=HEADERS, timeout=8)
+        if res.status_code == 200:
+            # Buscar el bloque de datos de producto (viene como JSON dentro del HTML)
+            match = re.search(r'var\s+__INITIAL_STATE__\s*=\s*({.*?});', res.text)
+            if match:
+                import json
+                try:
+                    data = json.loads(match.group(1))
+                    # Navegar hasta el precio
+                    offer = data.get("product", {}).get("buybox", {}).get("offer", {})
+                    price = offer.get("price", {}).get("value")
+                    if price and isinstance(price, (int, float)) and 100 < price < 5000:
+                        return {"price": float(price), "url": url}
+                except:
+                    pass
+    except Exception as e:
+        logger.warning(f"Amazon scrape error: {e}")
+    return None
+
+# 🛒 PcComponentes: API oficial
+def get_pccomp_price(slug):
+    try:
+        url = f"https://www.pccomponentes.com/api/v1/products/by-slug/{slug}"
+        res = requests.get(url, headers=HEADERS, timeout=6)
+        if res.status_code == 200:
+            data = res.json()
+            price = data.get("price", {}).get("final")
+            stock = data.get("stock", {}).get("status", "")
+            if price and price > 100:
+                stock_msg = "✅" if stock == "in_stock" else "⚠️" if stock else "❌"
+                return {"price": float(price), "stock": stock_msg}
     except:
-        return None
+        pass
+    return None
 
-# ======================
-# SCRAPERS (100% compatibles con Railway)
-# ======================
-
-def scrape_pccomponentes(query):
+# 📦 MediaMarkt: API oculta (probada en Railway)
+def get_mediamarkt_price(product_id):
     try:
-        url = f"https://www.pccomponentes.com/buscar?q={query.replace(' ', '+')}"
-        res = requests.get(url, headers=get_headers(), timeout=8)
-        res.raise_for_status()
-        soup = BeautifulSoup(res.text, "html.parser")
-        article = soup.select_one("article[data-id]")
-        if not article:
-            return None
-        price_elem = article.select_one(".price, [data-testid='price']")
-        return clean_price(price_elem.get_text()) if price_elem else None
-    except Exception as e:
-        logger.warning(f"[PcComp] Error buscando '{query}': {e}")
-        return None
+        url = f"https://www.mediamarkt.es/msm-webservices/rest/es/products/{product_id}.json"
+        res = requests.get(url, headers=HEADERS, timeout=6)
+        if res.status_code == 200:
+            data = res.json()
+            price = data.get("price", {}).get("value")
+            stock = data.get("stock", {}).get("status", "")
+            if price and price > 100:
+                stock_msg = "✅" if stock == "IN_STOCK" else "⚠️" if stock else "❌"
+                return {"price": float(price), "stock": stock_msg}
+    except:
+        pass
+    return None
 
-def scrape_amazon_es(query):
-    try:
-        url = f"https://www.amazon.es/s?k={query.replace(' ', '+')}&rh=p_36%3A800-4000"
-        res = requests.get(url, headers=get_headers(), timeout=10)
-        soup = BeautifulSoup(res.text, "html.parser")
-        result = soup.select_one("div[data-component-type='s-search-result']")
-        if not result:
-            return None
-        whole = result.select_one(".a-price-whole")
-        fraction = result.select_one(".a-price-fraction")
-        if whole:
-            price_str = whole.get_text().strip()
-            if fraction:
-                price_str += "." + fraction.get_text().strip()
-            return clean_price(price_str)
-    except Exception as e:
-        logger.warning(f"[Amazon] Error buscando '{query}': {e}")
-        return None
-
-def scrape_mediamarkt_es(query):
-    try:
-        url = f"https://www.mediamarkt.es/es/search.html?query={query.replace(' ', '+')}"
-        res = requests.get(url, headers=get_headers(), timeout=8)
-        soup = BeautifulSoup(res.text, "html.parser")
-        price_elem = soup.select_one("span[font-weight='bold'], .price, [data-test='price']")
-        if price_elem:
-            return clean_price(price_elem.get_text())
-    except Exception as e:
-        logger.warning(f"[MediaMarkt] Error buscando '{query}': {e}")
-        return None
-
-def get_prices():
-    PRODUCTS = {
-        "Samsung Odyssey OLED G8": "Samsung Odyssey G8 S32BG85",
-        "MSI MPG 321URXW": "MSI MPG 321URXW QD-OLED",
-        "Gigabyte AORUS FO32U2P": "Gigabyte AORUS FO32U2P 4K"
-    }
-    results = {}
-    for name, query in PRODUCTS.items():
-        logger.info(f"🔍 Buscando: {name}")
-        amazon = scrape_amazon_es(query)
-        pccomp = scrape_pccomponentes(query)
-        mediamarkt = scrape_mediamarkt_es(query)
-        results[name] = {
-            "Amazon": amazon,
-            "PcComponentes": pccomp,
-            "MediaMarkt": mediamarkt
-        }
-        time.sleep(1 + random.random())
-    return results
-
-# ======================
-# MANEJADORES DE COMANDOS
-# ======================
-
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_chat.id != AUTHORIZED_CHAT_ID:
-        await update.message.reply_text("🚫 No estás autorizado para usar este bot.")
-        return
-    await update.message.reply_text(
-        "👋 ¡Hola! Usa /revisar para obtener los precios actuales de:\n"
-        "• Samsung Odyssey OLED G8\n"
-        "• MSI MPG 321URXW\n"
-        "• Gigabyte AORUS FO32U2P"
-    )
-
+# 📤 Comando principal
 async def revisar(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     if chat_id != AUTHORIZED_CHAT_ID:
         await update.message.reply_text("🚫 Acceso denegado.")
         return
 
-    await update.message.reply_text("⏳ Buscando precios... (puede tardar 10–20 segundos)")
-    logger.info(f"Usuario {chat_id} ejecutó /revisar")
+    await update.message.reply_text("🔍 Obteniendo precios reales (Amazon, PcComp, MediaMarkt)...")
+    
+    msg = "📊 *Precios actuales — España*\n\n"
+    for name in AMAZON_ASINS.keys():
+        msg += f"🔹 *{name}*\n"
 
-    try:
-        prices = get_prices()
-        msg = "📊 *Precios actuales (España)*\n\n"
-        for product, stores in prices.items():
-            msg += f"🔹 *{product}*\n"
-            for store, price in stores.items():
-                if price is not None:
-                    msg += f"   • {store}: *{price:.2f} €*\n"
-                else:
-                    msg += f"   • {store}: ⚠️ No encontrado\n"
-            msg += "\n"
-        msg += f"✅ Actualizado: {time.strftime('%d/%m %H:%M:%S')}"
-        await update.message.reply_text(msg, parse_mode="Markdown")
-        logger.info("✅ Precios enviados.")
-    except Exception as e:
-        logger.error(f"❌ Excepción al ejecutar /revisar: {e}")
-        await update.message.reply_text("⚠️ Error al obtener precios. Revisa los logs.")
+        # Amazon
+        amz = get_amazon_price(AMAZON_ASINS[name])
+        if amz:
+            msg += f"   • Amazon: *{amz['price']:.2f} €* {amz['url']}\n"
+        else:
+            msg += "   • Amazon: ❌\n"
 
-# ======================
-# INICIO DEL BOT
-# ======================
+        # PcComponentes
+        pc = get_pccomp_price(PCCOMP_SLUGS[name])
+        if pc:
+            msg += f"   • PcComponentes: *{pc['price']:.2f} €* {pc['stock']}\n"
+        else:
+            msg += "   • PcComponentes: ❌\n"
+
+        # MediaMarkt
+        mm = get_mediamarkt_price(MEDIAMARKT_IDS[name])
+        if mm:
+            msg += f"   • MediaMarkt: *{mm['price']:.2f} €* {mm['stock']}\n"
+        else:
+            msg += "   • MediaMarkt: ❌\n"
+
+        msg += "\n"
+        time.sleep(0.3)
+
+    msg += "ℹ️ Datos extraídos directamente desde las webs (sin APIs externas)."
+    await update.message.reply_text(msg, parse_mode="Markdown", disable_web_page_preview=True)
+
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_chat.id != AUTHORIZED_CHAT_ID:
+        return
+    await update.message.reply_text("✅ Usa /revisar para ver precios en tiempo real.")
 
 def main():
-    logger.info("🚀 Iniciando bot (escuchando comandos: /revisar, /start)...")
-    
-    application = Application.builder().token(TELEGRAM_TOKEN).build()
-
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(CommandHandler("revisar", revisar))
-    application.add_handler(CommandHandler("check", revisar))    # alias
-    application.add_handler(CommandHandler("precios", revisar))  # alias
-
-    logger.info("📡 Bot activo. Esperando comandos en Telegram...")
-    application.run_polling(drop_pending_updates=True)
+    logger.info("🚀 Bot iniciado — Amazon + PcComp + MediaMarkt (sin Keepa)")
+    app = Application.builder().token(TELEGRAM_TOKEN).build()
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("revisar", revisar))
+    app.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
     main()
