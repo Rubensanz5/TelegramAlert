@@ -32,10 +32,9 @@ productos = [
 TOKEN = os.environ.get("TELEGRAM_TOKEN")
 CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 
-# Archivo para historial de precios
 archivo_historial = "precios.json"
 
-# ------------------ Funciones de historial ------------------
+# ------------------ Historial ------------------
 def cargar_historial():
     try:
         with open(archivo_historial, "r") as f:
@@ -47,37 +46,40 @@ def guardar_historial(historial):
     with open(archivo_historial, "w") as f:
         json.dump(historial, f, indent=2)
 
-# ------------------ Función para obtener precio ------------------
+# ------------------ Función para obtener precio usando Playwright ------------------
 def obtener_precio(url, tienda):
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                      "AppleWebKit/537.36 (KHTML, like Gecko) "
-                      "Chrome/118.0.5993.90 Safari/537.36",
-        "Accept-Language": "es-ES,es;q=0.9"
-    }
     try:
-        page = requests.get(url, headers=headers, timeout=10)
-        soup = BeautifulSoup(page.text, "html.parser")
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=True)
+            page = browser.new_page()
+            page.goto(url, timeout=15000)  # 15 segundos
+            precio = None
 
-        if tienda == "pc":
-            tag = soup.find("span", class_="product-sales-price") or \
-                  soup.find("span", class_="precio")
-            if tag:
-                texto = tag.text.strip().replace(".", "").replace("€", "").replace(",", ".")
-                return float(texto)
+            if tienda == "pc":
+                try:
+                    tag = page.query_selector("span.product-sales-price") or page.query_selector("span.precio")
+                    if tag:
+                        texto = tag.inner_text().strip().replace(".", "").replace("€", "").replace(",", ".")
+                        precio = float(texto)
+                except:
+                    precio = None
 
-        elif tienda == "amazon":
-            tag = soup.find("span", class_="a-offscreen")
-            if tag:
-                texto = tag.text.strip().replace("€", "").replace(".", "").replace(",", ".")
-                return float(texto)
+            elif tienda == "amazon":
+                try:
+                    tag = page.query_selector("span.a-offscreen")
+                    if tag:
+                        texto = tag.inner_text().strip().replace("€", "").replace(".", "").replace(",", ".")
+                        precio = float(texto)
+                except:
+                    precio = None
 
+            browser.close()
+            return precio
     except Exception as e:
         print(f"Error al obtener precio de {tienda} ({url}): {e}")
+        return None
 
-    return None
-
-# ------------------ Función principal de revisión ------------------
+# ------------------ Función de revisión ------------------
 async def revisar(context: ContextTypes.DEFAULT_TYPE):
     historial = cargar_historial()
     mensajes = []
@@ -109,13 +111,13 @@ async def comando_revisa(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await revisar(context)
     await update.message.reply_text("✅ Revisión completada.")
 
-# ------------------ Función principal del bot ------------------
+# ------------------ Función principal ------------------
 def main():
     app = ApplicationBuilder().token(TOKEN).build()
 
     app.add_handler(CommandHandler("revisa", comando_revisa))
 
-    # JobQueue para revisiones automáticas
+    # Revisiones automáticas
     jq = app.job_queue
     jq.run_daily(revisar, time(hour=11))
     jq.run_daily(revisar, time(hour=23))
@@ -125,3 +127,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
